@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import argparse
 import os
+from typing import Any, Dict, Optional
 
 import hydra
 from matplotlib import pyplot as plt
@@ -10,10 +10,12 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
 import torch
 from torchvision import datasets, transforms
-from torch.utils.data import Dataset
 import warnings
+
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def diag(x:torch.Tensor):
     idx = torch.arange(x.shape[-1])
@@ -110,6 +112,7 @@ class LieFlowModule(pl.LightningModule):
         super().__init__()
         self.model = self.create_model(input_shape, expdim, layersize)
         self.save_hyperparameters({'expdim':expdim,'layersize':layersize}, logger=False)
+        self.sigma = np.sqrt(var)
         self.a = 1/(2*var)
         self.b = np.log(2*torch.pi*var)/2
       
@@ -150,62 +153,49 @@ class LieFlowModule(pl.LightningModule):
         avg_acc = torch.stack(outputs).mean()
         self.logger.log_hyperparams(self.hparams, metrics={'val/loss':avg_acc})
     
-    def test_step(self, batch, batch_idx, dataloader_id=None):
-        x, y = batch
-        pred = self.model.infer(x)
-        return pred
-    
-    def test_epoch_end(self, outputs) -> None:
-        preds = torch.cat(outputs)
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.model.parameters())
+   
+class SaveGeneratedData(pl.Callback):
+    def __init__(self) -> None:
+        super().__init__()
+        
+    def on_save_checkpoint(self, trainer:pl.Trainer, pl_module:LieFlowModule, checkpoint: Dict[str, Any]) -> Optional[dict]:
+        z = torch.randn((25,pl_module.model.in_features), device=pl_module.device)*pl_module.sigma
+        data = pl_module.model.infer(z)
         fig,ax = plt.subplots(5,5)
         for i in range(5):
             for j in range(5):
-                ax[i,j].imshow(preds[5*i+j,0].cpu().detach().numpy())
+                ax[i,j].imshow(data[5*i+j,0].cpu().detach().numpy())
         plt.close(fig)
-        self.logger.experiment.add_figure("Generated data", fig, self.current_epoch)
+        trainer.logger.experiment.add_figure("Generated data", fig, pl_module.current_epoch)
+        return super().on_save_checkpoint(trainer, pl_module, checkpoint)
 
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters())
-
-class Gauusian(Dataset):
-    def __init__(self, data_size, data_shape, mean=0., var=1) -> None:
-        super().__init__()
-        self.data_size = data_size
-        self.data_shape = data_shape
-        self.mu = mean
-        self.sigma = np.sqrt(var)
-        
-    def __len__(self):
-        return self.data_size
-    
-    def __getitem__(self, index):
-        return torch.randn(self.data_shape)*self.sigma + self.mu, torch.empty(1)
-
-@hydra.main(config_path='/home/miyashita/gitrepo/LieFlow/conf',config_name='config.yaml')
+@hydra.main(config_path=os.path.join(root, 'conf'),config_name='config.yaml')
 def main(cfg):
     warnings.simplefilter('ignore')
     
     transform = transforms.Compose([transforms.ToTensor(),])
-
-    train_dataset = datasets.MNIST(cfg.data_dir, train=True, download=True, transform=transform)
-    val_dataset = datasets.MNIST(cfg.data_dir, train=False, transform=transform)    
-    test_dataset = Gauusian(cfg.batch_size, (1*28*28,), var=cfg.var)
+    data_dir = os.path.join(root, 'data')
+    train_dataset = datasets.MNIST(data_dir, train=True, download=True, transform=transform)
+    val_dataset = datasets.MNIST(data_dir, train=False, transform=transform)    
+    
+    callback1 = SaveGeneratedData()
+    callback2 = ModelCheckpoint(**cfg.model_checkpoint)
 
     datamodule = pl.LightningDataModule.from_datasets(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        test_dataset=test_dataset,
         batch_size=cfg.batch_size,
         num_workers=4)
     
     model = LieFlowModule((1,28,28), cfg.expdim, cfg.layersize, cfg.var)
     
     logger = TensorBoardLogger(**cfg.logger)
-    trainer = pl.Trainer(**cfg.trainer, logger=logger)
+    trainer = pl.Trainer(**cfg.trainer, logger=logger, callbacks=[callback1, callback2])
         
     trainer.fit(model=model, datamodule=datamodule)
     trainer.validate(model=model, datamodule=datamodule)
-    trainer.test(model=model, datamodule=datamodule)
 
 
 if __name__ == "__main__":

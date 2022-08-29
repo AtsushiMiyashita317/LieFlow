@@ -1,14 +1,16 @@
-data_dir: /home/miyashita/gitrepo/LieFlow/data/
 expdim: 16
 layersize: 4
 var: 1.
 batch_size: 1000
+model_checkpoint:
+  every_n_epochs: 100
+  save_top_k: -1
 logger:
   name: test_lieflow
   save_dir: logs/lightning_logs
   default_hp_metric: false
 trainer:
-  max_epochs: 10
+  max_epochs: 1000
   gpus: 1
 
 hydra:
